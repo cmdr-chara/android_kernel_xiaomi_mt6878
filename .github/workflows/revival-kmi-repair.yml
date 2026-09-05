@@ -1,0 +1,64 @@
+name: One-shot guarded malachite KMI repair
+
+on:
+  push:
+    branches: [revival/kmi-symbol-repair]
+    paths: [.github/workflows/revival-kmi-repair.yml]
+
+permissions:
+  contents: read
+
+jobs:
+  repair:
+    if: github.repository == 'cmdr-chara/android_kernel_xiaomi_mt6878' && github.ref == 'refs/heads/revival/kmi-symbol-repair'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: true
+      - name: Add only the two module dependencies reported by the pinned build
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = cmdr-chara/android_kernel_xiaomi_mt6878
+          test "$GITHUB_REF" = refs/heads/revival/kmi-symbol-repair
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test -z "$(git status --porcelain)"
+          python3 - <<'PY'
+          import hashlib
+          from pathlib import Path
+          path = Path('android/abi_gki_aarch64_mtk')
+          data = path.read_bytes()
+          oid = hashlib.sha1(b'blob ' + str(len(data)).encode() + b'\0' + data).hexdigest()
+          if oid != 'e95d122c0ac103f0bfda4e2a696c8af3a4da39d4':
+              raise SystemExit('STOP: the inspected MTK symbol list changed')
+          original = data.decode('utf-8').splitlines(keepends=True)
+          if original[0] != '[abi_symbol_list]\n' or not data.endswith(b'\n'):
+              raise SystemExit('STOP: unexpected symbol-list format')
+          added = ('__skb_pad', '__tty_port_tty_hangup')
+          if any(symbol in {line.strip() for line in original} for symbol in added):
+              raise SystemExit('STOP: an intended addition is already present')
+          lines = original.copy()
+          for symbol in added:
+              # Preserve every existing line; place additions before the next symbol.
+              position = next((i for i, line in enumerate(lines) if i > 0 and line.startswith('  ') and line.strip().lstrip('_') > symbol.lstrip('_')), len(lines))
+              lines.insert(position, f'  {symbol}\n')
+          if [line for line in lines if line.strip() not in added] != original:
+              raise SystemExit('STOP: existing symbol-list content would change')
+          if len(lines) != len(original) + 2:
+              raise SystemExit('STOP: change is not exactly two additions')
+          path.write_bytes(''.join(lines).encode('utf-8'))
+          PY
+          test "$(git diff --numstat)" = "$(printf '2\t0\tandroid/abi_gki_aarch64_mtk')"
+          git diff --check
+          git diff -- android/abi_gki_aarch64_mtk
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -- android/abi_gki_aarch64_mtk
+          git commit -m 'ANDROID: abi_gki_aarch64_mtk: retain USB and RFCOMM module dependencies' -m 'Pinned build 33990250234 requires __skb_pad for rtl8150.ko and __tty_port_tty_hangup for rfcomm.ko, cdc-acm.ko and usbserial.ko. Add only these symbols; preserve KMI enforcement and existing entries. Rebuild and ABI review remain required.'
+          test "$(git ls-remote origin refs/heads/revival/kmi-symbol-repair | cut -f1)" = "$GITHUB_SHA"
+          git push origin HEAD:refs/heads/revival/kmi-symbol-repair
+          git rev-parse HEAD
