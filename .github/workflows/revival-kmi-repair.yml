@@ -1,0 +1,45 @@
+name: Malachite additive KMI contract
+
+on:
+  push:
+    branches: [revival/kmi-symbol-repair]
+  pull_request:
+    branches: [lineage-23.2]
+
+permissions:
+  contents: read
+
+jobs:
+  contract:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Compare only the two evidenced symbol additions with the inspected baseline
+        run: |
+          set -euo pipefail
+          git fetch --no-tags --depth=1 https://github.com/cmdr-chara/android_kernel_xiaomi_mt6878.git 9f205dab5f27cf81e5036aeb46d7b79c13a751d9
+          python3 - <<'PY'
+          import hashlib
+          from pathlib import Path
+          import subprocess
+          path = 'android/abi_gki_aarch64_mtk'
+          original = subprocess.check_output(['git', 'show', f'9f205dab5f27cf81e5036aeb46d7b79c13a751d9:{path}'])
+          oid = hashlib.sha1(b'blob ' + str(len(original)).encode() + b'\0' + original).hexdigest()
+          if oid != 'e95d122c0ac103f0bfda4e2a696c8af3a4da39d4':
+              raise SystemExit('Unexpected original symbol-list identity')
+          data = Path(path).read_bytes()
+          lines = data.splitlines(keepends=True)
+          added = {b'  __skb_pad\n', b'  __tty_port_tty_hangup\n'}
+          if any(lines.count(symbol) != 1 for symbol in added):
+              raise SystemExit('Each evidenced KMI dependency must appear exactly once')
+          if b''.join(line for line in lines if line not in added) != original:
+              raise SystemExit('Existing symbols changed or unrelated symbols were added')
+          changed = subprocess.check_output(['git', 'diff', '--name-only', '9f205dab5f27cf81e5036aeb46d7b79c13a751d9', 'HEAD'], text=True).splitlines()
+          if set(changed) != {path, '.github/workflows/revival-kmi-repair.yml'}:
+              raise SystemExit('Unexpected files in the isolated KMI candidate')
+          print('PASS: exactly two additive KMI symbols; existing source and enforcement settings unchanged')
+          PY
+          git diff --check 9f205dab5f27cf81e5036aeb46d7b79c13a751d9 HEAD
